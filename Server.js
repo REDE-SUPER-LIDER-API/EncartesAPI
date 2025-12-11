@@ -1,11 +1,10 @@
-// server.js (Versão Limpa e Otimizada com Cloudinary, Upstash Redis e Cron Job)
+// server.js (Versão Limpa e Otimizada com Cloudinary e Upstash Redis)
 
 const express = require('express');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const { Redis } = require('@upstash/redis');
-const cron = require('node-cron'); // <--- NOVO: Importar node-cron
 
 const app = express();
 
@@ -26,376 +25,408 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// --- CHAVES DE BANNERS (EXISTENTES) ---
+// --- CHAVES ATUALIZADAS PARA SUPORTE A POSIÇÃO (ZSET) E DIAS (HASH) ---
+// O ZSET ACTIVE_BANNERS_KEY guardará: {URL -> Score (Posição)}
 const ACTIVE_BANNERS_KEY = 'active_banners_ordered'; 
-const BANNER_DAYS_KEY = 'banner_days_config';
-const DISABLED_BANNERS_KEY = 'disabled_banners_set';
-const BANNER_FOLDER = 'banners_rotativos'; 
+// O HASH BANNER_DAYS_KEY guardará: {URL -> DiaDaSemana ('ALL', 'MON', etc.)}
+const BANNER_DAYS_KEY = 'banner_day_rules'; 
 
-// --- NOVAS CHAVES PARA ENCARTES ---
-const ENCARTES_KEY = 'active_encartes_list'; // Lista simples, sem posição ou dia
-const ENCARTE_FOLDER = 'encartes_daily'; // Pasta dedicada no Cloudinary
+const DISABLED_BANNERS_KEY = 'disabled_banner_urls'; 
+const CLOUDINARY_FOLDER = 'banners_folder'; 
+const FOLDER_TAG = 'banners_tag'; 
 
-// ------------------------------------------------------------------------
-// --- 0. FUNÇÃO DE LIMPEZA PROGRAMADA PARA ENCARTES ---
-// ------------------------------------------------------------------------
-
-/**
- * Função para remover todos os encartes ativos do Redis e Cloudinary.
- * Agendado para rodar à 00:00 (Meia-noite) no fuso horário de Brasília (BRT).
- */
-async function clearAllEncartes() {
-    // Definir o fuso horário para log
-    const options = { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', second: '2-digit' };
-    console.log(`\n🧹 Iniciando limpeza diária de Encartes... (${new Date().toLocaleTimeString('pt-BR', options)})`);
-    
-    try {
-        // 1. Obter URLs de todos os encartes do Redis
-        const encarteUrls = await redis.lrange(ENCARTES_KEY, 0, -1);
-        
-        if (encarteUrls.length === 0) {
-            console.log('✅ Nenhum encarte encontrado no Redis para exclusão.');
-            return;
-        }
-
-        // 2. Extrair Public IDs do Cloudinary
-        const publicIds = encarteUrls.map(url => {
-            const parts = url.split('/');
-            const filenameWithExt = parts[parts.length - 1];
-            // Ex: encartes_daily/image_id
-            return `${ENCARTE_FOLDER}/${filenameWithExt.split('.')[0]}`;
-        });
-        
-        // 3. Deletar todos os arquivos do Cloudinary
-        console.log(`🔥 Deletando ${publicIds.length} arquivos no Cloudinary...`);
-        // Usamos api.delete_resources para exclusão em massa, mais eficiente
-        const destroyResult = await cloudinary.api.delete_resources(publicIds); 
-        
-        if (destroyResult.deleted && Object.keys(destroyResult.deleted).length > 0) {
-             console.log(`✅ Cloudinary: ${Object.keys(destroyResult.deleted).length} recursos deletados com sucesso.`);
-        } else {
-             console.log('⚠️ Cloudinary: Nenhum recurso deletado. Resultado:', destroyResult);
-        }
-
-        // 4. Remover a chave de lista inteira do Redis.
-        await redis.del(ENCARTES_KEY);
-        console.log(`✅ Redis: Chave ${ENCARTES_KEY} removida (limpeza total).`);
-        
-    } catch (error) {
-        console.error('❌ Erro durante a limpeza diária de Encartes:', error);
-    }
-}
-
-// Agendamento do Cron Job para 00:00 (Meia-noite) no fuso horário de Brasília (BRT)
-// O agendamento '0 0 * * *' no fuso horário America/Sao_Paulo garante que rode à 00:00 BRT.
-cron.schedule('0 0 * * *', clearAllEncartes, {
-    scheduled: true,
-    timezone: "America/Sao_Paulo" // Força o fuso horário do cron para 00:00 BRT
-});
-
-console.log('⏰ Cron job para limpeza diária de encartes agendado para 00:00 BRT.');
-
+// Mapeamento de Dias da Semana (0=Dom, 6=Sáb) para chaves
+const DAYS_MAP = {
+    0: 'SUN',
+    1: 'MON',
+    2: 'TUE',
+    3: 'WED',
+    4: 'THU',
+    5: 'FRI',
+    6: 'SAT',
+};
 
 // ------------------------------------------------------------------------
-// --- 2. MIDDLEWARES E CONFIGURAÇÕES DE UPLOAD ---
+// --- 2. MIDDLEWARES ---
 // ------------------------------------------------------------------------
 
 app.use(cors());
-app.use(express.json()); // Para parsing application/json
+app.use(express.json()); 
 
-// Configuração do Multer (Armazenar na memória para enviar ao Cloudinary)
-const upload = multer({ storage: multer.memoryStorage() });
-
+// Configuração Multer (Armazenamento em Memória)
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
 
 // ------------------------------------------------------------------------
-// --- 3. ROTA: GET /api/banners (LISTAR BANNERS ATIVOS) ---
+// --- 3. FUNÇÕES AUXILIARES (UTILITIES) ---
 // ------------------------------------------------------------------------
 
-app.get('/api/banners', async (req, res) => {
-    // Determinar o dia da semana atual em BRT (GMT-3)
-    const now = new Date();
-    // Usa toLocaleString para obter o dia da semana em UTC (que é o fuso horário padrão do servidor, mas com o dia correto)
-    const dayOfWeek = now.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'America/Sao_Paulo' }).toUpperCase(); // Ex: MON
-
+/**
+ * Extrai o 'public_id' completo (com a pasta) da URL do Cloudinary.
+ * Ex: 'banners_folder/public_id_aqui'
+ * @param {string} url - A URL completa do banner.
+ * @returns {string | null} O public_id ou null em caso de falha.
+ */
+const extractPublicIdFromUrl = (url) => {
     try {
-        // 1. Obter URLs dos banners ativos, ordenados pela posição (ZSET)
-        // ZRANGE ACTIVE_BANNERS_KEY 0 -1 WITHSCORES
-        const activeBanners = await redis.zrange(ACTIVE_BANNERS_KEY, 0, -1, { withScores: true });
-
-        // 2. Obter a configuração de dias de todos os banners (HASH)
-        const bannerDaysConfig = await redis.hgetall(BANNER_DAYS_KEY) || {};
-
-        // 3. Obter a lista de banners desativados (SET)
-        const disabledBanners = await redis.smembers(DISABLED_BANNERS_KEY) || [];
-        const disabledSet = new Set(disabledBanners);
-
-        const bannersForToday = [];
-        let position = 0;
-
-        for (let i = 0; i < activeBanners.length; i += 2) {
-            const url = activeBanners[i];
-            // const score = activeBanners[i + 1]; // Score é a posição
-
-            const dayConfig = bannerDaysConfig[url] || 'ALL'; // Padrão é ALL
-            const isActive = !disabledSet.has(url);
-
-            // Filtragem pela lógica: Se o banner está ativo E o dia for ALL ou o dia de hoje
-            const isDisplayableToday = isActive && (dayConfig === 'ALL' || dayConfig === dayOfWeek);
-
-            if (isDisplayableToday) {
-                // Se o cliente (app) só precisar da URL, podemos simplificar:
-                // bannersForToday.push(url);
-
-                // Se precisar de mais detalhes:
-                 bannersForToday.push({
-                     url: url,
-                     day: dayConfig,
-                     position: position++, // Posição é dada pela ordem no ZSET
-                     status: isActive ? 'active' : 'disabled' // Tecnicamente sempre ativo se passou no filtro 'isActive', mas é bom manter a propriedade
-                 });
-            }
-        }
+        // Exemplo: https://res.cloudinary.com/dvxxxxxx/image/upload/v1700000000/banners_folder/public_id_aqui.png
+        const parts = url.split('/');
         
-        console.log(`📢 Banners listados para ${dayOfWeek} em BRT: ${bannersForToday.length} ativos.`);
-        return res.json(bannersForToday.map(b => ({ url: b.url }))); // Retorna apenas a lista de URLs para o cliente
+        // Verifica se a URL tem o formato esperado
+        if (parts.length < 2) return null;
+        
+        // O nome do arquivo é o último item (excluindo a extensão)
+        const fileNameWithExt = parts[parts.length - 1];
+        const fileName = fileNameWithExt.substring(0, fileNameWithExt.lastIndexOf('.'));
+        
+        // O nome da pasta é o penúltimo item, garantindo que seja o folder que definimos
+        const folderName = parts[parts.length - 2]; 
+        
+        if (folderName !== CLOUDINARY_FOLDER) return null;
 
-    } catch (error) {
-        console.error('❌ Erro ao listar banners:', error);
-        return res.status(500).json({ error: 'Falha ao listar banners.' });
+        return `${folderName}/${fileName}`;
+
+    } catch (e) {
+        console.error('Erro ao extrair public_id:', e);
+        return null;
     }
-});
+};
+
+/**
+ * Retorna os banners ativos com a respectiva posição e dia.
+ * @returns {Array<{url: string, day: string, position: number}>} Lista de banners ativos e ordenados.
+ */
+const getActiveBannersOrdered = async () => {
+    // 1. Obtém todos os membros (URLs) e scores (posições) do ZSET, ordenados por score.
+    // O 'true' no final retorna [member, score, member, score, ...]
+    const zgetData = await redis.zrange(ACTIVE_BANNERS_KEY, 0, -1, { withScores: true });
+
+    if (!zgetData || zgetData.length === 0) return [];
+
+    // 2. Transforma o array em um mapa de {url: position}
+    const bannersWithPosition = {};
+    for (let i = 0; i < zgetData.length; i += 2) {
+        // zgetData é [url, score, url, score, ...]
+        bannersWithPosition[zgetData[i]] = zgetData[i + 1]; 
+    }
+
+    // 3. Obtém todas as regras de dia do Hash
+    const bannerDayRules = await redis.hgetall(BANNER_DAYS_KEY);
+
+    // 4. Combina as informações
+    return Object.entries(bannersWithPosition).map(([url, position]) => ({
+        url,
+        day: bannerDayRules[url] || 'ALL', // Dia padrão se não houver regra
+        position: parseInt(position)
+    }));
+};
 
 
 // ------------------------------------------------------------------------
-// --- 4. ROTAS: UPLOAD/REMOÇÃO/ORDEM de BANNERS (EXISTENTES) ---
+// --- 4. ROTAS ---
 // ------------------------------------------------------------------------
 
-// Rota para listar TUDO (incluindo desativados), usado pelo Dashboard
-app.get('/api/banners/all', async (req, res) => {
-    try {
-        // 1. Obter todos os banners ativos, ordenados pela posição (ZSET)
-        const activeBanners = await redis.zrange(ACTIVE_BANNERS_KEY, 0, -1, { withScores: true });
-
-        // 2. Obter a configuração de dias (HASH)
-        const bannerDaysConfig = await redis.hgetall(BANNER_DAYS_KEY) || {};
-
-        // 3. Obter a lista de banners desativados (SET)
-        const disabledBanners = await redis.smembers(DISABLED_BANNERS_KEY) || [];
-        const disabledSet = new Set(disabledBanners);
-
-        const allBanners = [];
-        const seenUrls = new Set();
-        let position = 0;
-
-        // Processa banners ORDENADOS (ACTIVE_BANNERS_KEY)
-        for (let i = 0; i < activeBanners.length; i += 2) {
-            const url = activeBanners[i];
-            const dayConfig = bannerDaysConfig[url] || 'ALL';
-            const isActive = !disabledSet.has(url);
-            
-            allBanners.push({
-                url: url,
-                day: dayConfig,
-                position: position++,
-                status: isActive ? 'active' : 'disabled'
-            });
-            seenUrls.add(url);
-        }
-
-        // Processa banners DESATIVADOS (DISABLED_BANNERS_KEY) que não estavam no ZSET por algum motivo (garantindo que todos sejam mostrados)
-        for (const url of disabledBanners) {
-            if (!seenUrls.has(url)) {
-                 allBanners.push({
-                    url: url,
-                    day: bannerDaysConfig[url] || 'ALL',
-                    position: -1, // Indica que não tem posição (está desativado)
-                    status: 'disabled'
-                });
-                seenUrls.add(url);
-            }
-        }
-
-        // Nota: Banners que estão apenas no HASH (BANNER_DAYS_KEY) mas não no ZSET ou SET são ignorados.
-        // O ZSET é a fonte primária de verdade para a lista de banners.
-
-        console.log(`📃 Dashboard: ${allBanners.length} banners carregados (Ativos/Desativados).`);
-        return res.json(allBanners);
-
-    } catch (error) {
-        console.error('❌ Erro ao listar todos os banners para o dashboard:', error);
-        return res.status(500).json({ error: 'Falha ao listar banners.' });
-    }
-});
-
-// Rota para UPLOAD de Banner
+/**
+ * POST /api/banners: Upload de imagem para o Cloudinary e ativação no Redis.
+ */
 app.post('/api/banners', upload.single('bannerImage'), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'Nenhuma imagem enviada.' });
-        }
-        
-        const day = req.body.day || 'ALL';
+    if (!req.file) {
+        return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+    }
+    
+    // Obtém o dia do corpo da requisição (padrão para 'ALL')
+    const day = req.body.day ? req.body.day.toUpperCase() : 'ALL';
+    const validDays = [...Object.values(DAYS_MAP), 'ALL'];
 
-        const base64Image = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+    if (!validDays.includes(day)) {
+        return res.status(400).json({ error: `Dia inválido. Use: ${validDays.join(', ')}` });
+    }
+
+    try {
+        const b64 = Buffer.from(req.file.buffer).toString("base64");
+        const dataURI = `data:${req.file.mimetype};base64,${b64}`;
 
         // 1. Upload para o Cloudinary
-        const uploadResult = await cloudinary.uploader.upload(base64Image, {
-            folder: BANNER_FOLDER, 
-            resource_type: 'image'
+        const result = await cloudinary.uploader.upload(dataURI, {
+            folder: CLOUDINARY_FOLDER, 
+            tags: [FOLDER_TAG]        
         });
+        
+        const bannerUrl = result.secure_url;
 
-        const bannerUrl = uploadResult.secure_url;
+        // 2. Define a nova posição como a última (score = tamanho atual do ZSET)
+        const currentSize = await redis.zcard(ACTIVE_BANNERS_KEY);
+        const newPosition = currentSize;
 
-        // 2. Adicionar ao Redis (ZSET para posição e HASH para dia)
-        // Adiciona com a pontuação (score) sendo um valor muito alto para ir para o fim da lista
-        const maxScore = await redis.zscore(ACTIVE_BANNERS_KEY, 'last_score_tracker');
-        const newScore = (maxScore ? parseFloat(maxScore) : 0) + 1;
+        // 3. Adiciona a URL ao ZSET de banners ativos com a nova posição
+        await redis.zadd(ACTIVE_BANNERS_KEY, { score: newPosition, member: bannerUrl });
 
-        await redis.zadd(ACTIVE_BANNERS_KEY, { score: newScore, member: bannerUrl });
+        // 4. Adiciona a regra de dia no HASH
         await redis.hset(BANNER_DAYS_KEY, { [bannerUrl]: day });
-        // Atualiza o rastreador de score
-        await redis.zadd(ACTIVE_BANNERS_KEY, { score: newScore, member: 'last_score_tracker' });
 
-        // Garante que não está na lista de desativados se for recém-adicionado
-        await redis.srem(DISABLED_BANNERS_KEY, bannerUrl);
 
-        console.log(`✨ Novo Banner ADICIONADO: ${bannerUrl} com dia ${day} e score ${newScore}`);
-        return res.status(201).json({ 
-            message: 'Banner enviado e ativado com sucesso!', 
+        console.log(`✅ Banner ${result.public_id} enviado e URL adicionada ao Redis com dia: ${day} e posição: ${newPosition}.`);
+        res.status(201).json({ // 201 Created é mais adequado para POST de criação
+            message: 'Upload bem-sucedido e banner ativado!', 
             url: bannerUrl,
             day: day,
-            position: newScore 
+            position: newPosition
         });
 
     } catch (error) {
-        console.error('❌ Erro ao enviar banner:', error);
-        return res.status(500).json({ error: 'Falha ao enviar banner.' });
+        console.error('❌ Erro ao processar upload:', error);
+        return res.status(500).json({ error: 'Falha ao fazer upload.', details: error.message });
     }
 });
 
-// Rota para REORDENAR (PUT)
-app.put('/api/banners/reorder', async (req, res) => {
-    const { urls } = req.body; // URLs na nova ordem [url1, url2, ...]
+/**
+ * GET /api/banners: Lista todos os banners ATIVOS *PARA O DIA ATUAL* e ordenados.
+ */
+app.get('/api/banners', async (req, res) => {
+    try {
+        const today = new Date().getDay(); // 0=Dom, 1=Seg, ..., 6=Sáb
+        const todayKey = DAYS_MAP[today]; // 'SUN', 'MON', etc.
+        
+        // Obtém todas as URLs ativas, suas posições e dias (já ordenado pela posição)
+        const activeBanners = await getActiveBannersOrdered();
 
-    if (!Array.isArray(urls) || urls.length === 0) {
-        return res.status(400).json({ error: 'Lista de URLs inválida.' });
+        // Filtra banners que são 'ALL' ou correspondem ao dia de hoje
+        const filteredUrls = activeBanners
+            .filter(banner => banner.day === 'ALL' || banner.day === todayKey)
+            .map(banner => banner.url);
+        
+        if (filteredUrls.length === 0) {
+            console.log("ℹ️ Nenhum banner ativo encontrado para o dia de hoje.");
+        }
+
+        // Retorna apenas a lista de URLs, já na ordem correta
+        res.json({ banners: filteredUrls, day: todayKey });
+        
+    } catch (error) {
+        console.error('❌ Erro ao carregar banners ativos do Redis:', error);
+        return res.status(500).json({ error: 'Falha ao carregar banners ativos.' });
+    }
+});
+
+/**
+ * GET /api/banners/all: Lista todos os banners ATIVOS *com a regra de dia* e posição. (Para o Dashboard)
+ */
+app.get('/api/banners/all', async (req, res) => {
+    try {
+        // Retorna a lista de objetos {url, day, position}
+        const activeBanners = await getActiveBannersOrdered(); 
+        
+        if (activeBanners.length === 0) {
+            console.log("ℹ️ Nenhum banner ativo encontrado.");
+        }
+
+        res.json({ banners: activeBanners });
+        
+    } catch (error) {
+        console.error('❌ Erro ao carregar todos os banners ativos do Redis:', error);
+        return res.status(500).json({ error: 'Falha ao carregar todos os banners ativos.' });
+    }
+});
+
+/**
+ * GET /api/banners/disabled: Lista todos os banners DESATIVADOS.
+ */
+app.get('/api/banners/disabled', async (req, res) => {
+    try {
+        const disabledUrls = await redis.smembers(DISABLED_BANNERS_KEY);
+        if (disabledUrls.length === 0) {
+            console.log("ℹ️ Nenhum banner desativado encontrado.");
+        }
+        res.json({ banners: disabledUrls });
+        
+    } catch (error) {
+        console.error('❌ Erro ao carregar banners desativados do Redis:', error);
+        return res.status(500).json({ error: 'Falha ao carregar banners desativados.' });
+    }
+});
+
+/**
+ * PUT /api/banners/disable: Move um banner de ativo para desativado no Redis.
+ */
+app.put('/api/banners/disable', async (req, res) => {
+    const { url } = req.body; 
+
+    if (!url) {
+        return res.status(400).json({ error: 'A URL do banner é obrigatória.' });
     }
 
     try {
-        // Remove todos os banners da lista ordenada (ZSET)
-        await redis.del(ACTIVE_BANNERS_KEY);
+        // 1. Remove do ZSET de ativos (a posição/score é ignorada, ele só remove o membro)
+        const removedFromActive = await redis.zrem(ACTIVE_BANNERS_KEY, url);
+        // 2. Remove do HASH de dias
+        const removedDayRule = await redis.hdel(BANNER_DAYS_KEY, url);
 
-        // Reinsere os banners na nova ordem (index + 1 como score)
-        const members = urls.map((url, index) => ({
-            score: index + 1,
-            member: url
-        }));
-        
-        // Adiciona um rastreador de score
-        members.push({ score: urls.length + 1, member: 'last_score_tracker' });
 
-        await redis.zadd(ACTIVE_BANNERS_KEY, ...members);
+        if (removedFromActive === 0) {
+            // Se não estava no ativo, verifica o desativado
+            const wasAlreadyDisabled = await redis.sismember(DISABLED_BANNERS_KEY, url);
+            if(wasAlreadyDisabled) {
+                 return res.status(404).json({ error: 'Banner já está na lista de desativados.' });
+            }
+            return res.status(404).json({ error: 'Banner não encontrado na lista de ativos.' });
+        }
 
-        console.log(`🔄 Banners REORDENADOS: ${urls.length} itens.`);
-        return res.json({ message: 'Ordem dos banners atualizada com sucesso.' });
+        // 3. Adiciona ao SET de desativados
+        await redis.sadd(DISABLED_BANNERS_KEY, url);
+
+        console.log(`✔️ Banner desativado: ${url}`);
+        return res.json({ message: 'Banner desativado com sucesso.', url });
 
     } catch (error) {
-        console.error('❌ Erro ao reordenar banners:', error);
+        console.error('❌ Erro ao desativar banner no Redis:', error);
+        return res.status(500).json({ error: 'Falha ao desativar banner.' });
+    }
+});
+
+
+/**
+ * PUT /api/banners/enable: Move um banner de desativado para ativo no Redis, definindo o dia.
+ */
+app.put('/api/banners/enable', async (req, res) => {
+    const { url, day } = req.body;
+    
+    // Dia padrão é 'ALL' se não for fornecido
+    const targetDay = day ? day.toUpperCase() : 'ALL';
+    const validDays = [...Object.values(DAYS_MAP), 'ALL'];
+
+    if (!url || !validDays.includes(targetDay)) {
+        return res.status(400).json({ error: 'A URL do banner é obrigatória e o dia deve ser válido.' });
+    }
+
+    try {
+        // 1. Remove do SET de desativados
+        const removedFromDisabled = await redis.srem(DISABLED_BANNERS_KEY, url);
+
+        if (removedFromDisabled === 0) {
+            // Se não estava no desativado, verifica se já está no ativo
+            const wasAlreadyActive = await redis.zscore(ACTIVE_BANNERS_KEY, url);
+            if (wasAlreadyActive !== null) {
+                return res.status(404).json({ error: 'Banner já está ativo.' });
+            }
+            return res.status(404).json({ error: 'Banner não encontrado na lista de desativados.' });
+        }
+
+        // 2. Define a nova posição como a última (score = tamanho atual do ZSET)
+        const currentSize = await redis.zcard(ACTIVE_BANNERS_KEY);
+        const newPosition = currentSize;
+
+        // 3. Adiciona ao ZSET de ativos com a nova regra de dia e posição
+        await redis.zadd(ACTIVE_BANNERS_KEY, { score: newPosition, member: url });
+
+        // 4. Adiciona/Atualiza a regra de dia no HASH
+        await redis.hset(BANNER_DAYS_KEY, { [url]: targetDay });
+
+        console.log(`✔️ Banner reativado: ${url} para o dia: ${targetDay} e posição: ${newPosition}`);
+        return res.json({ message: 'Banner reativado com sucesso.', url, day: targetDay, position: newPosition });
+
+    } catch (error) {
+        console.error('❌ Erro ao reativar banner no Redis:', error);
+        return res.status(500).json({ error: 'Falha ao reativar banner.' });
+    }
+});
+
+/**
+ * PUT /api/banners/update-day: Atualiza o dia de exibição de um banner ATIVO.
+ */
+app.put('/api/banners/update-day', async (req, res) => {
+    const { url, day } = req.body;
+    
+    const targetDay = day ? day.toUpperCase() : 'ALL';
+    const validDays = [...Object.values(DAYS_MAP), 'ALL'];
+
+    if (!url || !validDays.includes(targetDay)) {
+        return res.status(400).json({ error: 'A URL do banner é obrigatória e o dia deve ser válido.' });
+    }
+    
+    try {
+        // 1. Verifica se o banner existe no ZSET de ativos (a posição/score é obtida, mas não alterada)
+        const currentPosition = await redis.zscore(ACTIVE_BANNERS_KEY, url);
+
+        if (currentPosition === null) {
+            return res.status(404).json({ error: 'Banner não encontrado na lista de ativos.' });
+        }
+
+        // 2. Atualiza o valor no HASH de dias
+        await redis.hset(BANNER_DAYS_KEY, { [url]: targetDay });
+
+        console.log(`🔄 Dia do Banner atualizado: ${url} para ${targetDay}.`);
+        return res.json({ message: 'Dia de exibição atualizado com sucesso.', url, day: targetDay });
+
+    } catch (error) {
+        console.error('❌ Erro ao atualizar o dia do banner no Redis:', error);
+        return res.status(500).json({ error: 'Falha ao atualizar o dia do banner.' });
+    }
+});
+
+/**
+ * PUT /api/banners/reorder: Atualiza a ordem dos banners ativos.
+ * Recebe uma lista de URLs na ordem desejada.
+ */
+app.put('/api/banners/reorder', async (req, res) => {
+    const { orderedUrls } = req.body;
+
+    if (!Array.isArray(orderedUrls)) {
+        return res.status(400).json({ error: 'Lista de URLs ordenadas é obrigatória.' });
+    }
+
+    try {
+        // Cria um array de {score, member} para o comando ZADD
+        const updates = orderedUrls.map((url, index) => ({
+            score: index, // A posição na lista é o novo score (0, 1, 2, ...)
+            member: url
+        }));
+
+        if (updates.length === 0) {
+             return res.status(200).json({ message: 'Nenhuma URL para reordenar.' });
+        }
+        
+        // O ZADD com novos scores atualiza a posição dos membros existentes.
+        // O número de membros atualizados/adicionados é retornado.
+        const updatedCount = await redis.zadd(ACTIVE_BANNERS_KEY, ...updates);
+
+        // Se o número de atualizados for diferente do esperado, pode haver um erro, mas ZADD é robusto.
+        console.log(`✨ Reordenação concluída. ${updatedCount} banners atualizados.`);
+        return res.json({ message: 'Ordem dos banners atualizada com sucesso.', updatedCount });
+
+    } catch (error) {
+        console.error('❌ Erro ao reordenar banners no Redis:', error);
         return res.status(500).json({ error: 'Falha ao reordenar banners.' });
     }
 });
 
-// Rota para ATIVAR/DESATIVAR (PUT)
-app.put('/api/banners/toggle', async (req, res) => {
-    const { url, status } = req.body; // status: 'active' ou 'disabled'
 
-    if (!url || !['active', 'disabled'].includes(status)) {
-        return res.status(400).json({ error: 'URL ou status inválido.' });
+/**
+ * DELETE /api/banners: Exclui permanentemente o banner do Redis e Cloudinary.
+ */
+app.delete('/api/banners', async (req, res) => {
+    const { url } = req.body;
+
+    if (!url) {
+        return res.status(400).json({ error: 'A URL do banner é obrigatória para a exclusão.' });
     }
 
     try {
-        if (status === 'disabled') {
-            // Adiciona à lista de desativados
-            await redis.sadd(DISABLED_BANNERS_KEY, url);
-            
-            console.log(`🚫 Banner DESATIVADO: ${url}`);
-            return res.json({ message: 'Banner desativado com sucesso.', status: 'disabled' });
-            
-        } else if (status === 'active') {
-            // Remove da lista de desativados
-            await redis.srem(DISABLED_BANNERS_KEY, url);
-            
-            // Reativação também pode redefinir o dia para o padrão (ALL)
-            const dayToReactivate = req.body.day || 'ALL';
-            await redis.hset(BANNER_DAYS_KEY, { [url]: dayToReactivate });
-            
-            // Garante que o banner esteja na lista ordenada (caso tenha sido removido/esquecido)
-            const scoreExists = await redis.zscore(ACTIVE_BANNERS_KEY, url);
-            if (scoreExists === null) {
-                // Adiciona ao final da lista ordenada
-                const maxScore = await redis.zscore(ACTIVE_BANNERS_KEY, 'last_score_tracker');
-                const newScore = (maxScore ? parseFloat(maxScore) : 0) + 1;
-                await redis.zadd(ACTIVE_BANNERS_KEY, { score: newScore, member: url });
-                await redis.zadd(ACTIVE_BANNERS_KEY, { score: newScore, member: 'last_score_tracker' });
-            }
+        // 1. Tenta remover a URL dos locais do Redis
+        const removedActive = await redis.zrem(ACTIVE_BANNERS_KEY, url); // Remove do ZSET
+        const removedDayRule = await redis.hdel(BANNER_DAYS_KEY, url); // Remove do HASH de dias
+        const removedDisabled = await redis.srem(DISABLED_BANNERS_KEY, url); // Remove do SET de desativados
+        
+        const redisRemoved = removedActive + removedDisabled; // Contagem de ativo/desativado
 
-            console.log(`✅ Banner ATIVADO: ${url}`);
-            return res.json({ message: 'Banner ativado com sucesso.', status: 'active' });
+        if (redisRemoved === 0 && removedDayRule === 0) {
+            return res.status(404).json({ error: 'Banner não encontrado nos registros do Redis.' });
         }
 
-    } catch (error) {
-        console.error('❌ Erro ao ativar/desativar banner:', error);
-        return res.status(500).json({ error: 'Falha ao ativar/desativar banner.' });
-    }
-});
+        // 2. Extrai o public_id da URL do Cloudinary
+        const publicId = extractPublicIdFromUrl(url);
 
-// Rota para ATUALIZAR DIA (PUT)
-app.put('/api/banners/day', async (req, res) => {
-    const { url, day } = req.body; 
-
-    if (!url || !day) {
-        return res.status(400).json({ error: 'URL ou dia inválido.' });
-    }
-
-    try {
-        // Atualiza a configuração de dia no HASH
-        await redis.hset(BANNER_DAYS_KEY, { [url]: day });
-        
-        console.log(`📅 Banner ${url} atualizado para o dia ${day}`);
-        return res.json({ message: 'Dia de exibição atualizado com sucesso.', day });
-
-    } catch (error) {
-        console.error('❌ Erro ao atualizar dia do banner:', error);
-        return res.status(500).json({ error: 'Falha ao atualizar dia do banner.' });
-    }
-});
-
-// Rota para DELETAR Banner
-app.delete('/api/banners/:url', async (req, res) => {
-    const url = decodeURIComponent(req.params.url);
-
-    try {
-        // 1. Remove de todas as chaves do Redis
-        const redisRemovedFromZSet = await redis.zrem(ACTIVE_BANNERS_KEY, url);
-        const redisRemovedFromDayHash = await redis.hdel(BANNER_DAYS_KEY, url);
-        const redisRemovedFromDisabledSet = await redis.srem(DISABLED_BANNERS_KEY, url);
-
-        const redisRemoved = redisRemovedFromZSet + redisRemovedFromDayHash + redisRemovedFromDisabledSet;
-
-        if (redisRemoved === 0) {
-            console.warn(`⚠️ Redis: Banner ${url} não encontrado no Redis para exclusão.`);
-        }
-        
-        let publicId;
-        
-        try {
-            // Extrai o public ID do Cloudinary
-            // Ex: .../banners_rotativos/image_id.jpg -> banners_rotativos/image_id
-            const parts = url.split('/');
-            const filenameWithExt = parts[parts.length - 1];
-            publicId = `${BANNER_FOLDER}/${filenameWithExt.split('.')[0]}`;
-        } catch (e) {
-             console.warn(`⚠️ Cloudinary: Falha ao extrair ID para exclusão. URL: ${url}`);
+        if (!publicId) {
+             console.error(`⚠️ Falha ao extrair public_id de: ${url}. Apenas remoção do Redis realizada.`);
              return res.status(200).json({ message: 'Banner removido do Redis, mas falhou ao extrair o ID para exclusão no Cloudinary.', url, redisRemoved });
         }
 
@@ -424,124 +455,7 @@ app.delete('/api/banners/:url', async (req, res) => {
 });
 
 
-// ========================================================================
-// --- 5. NOVAS ROTAS: /api/encartes ---
-// ========================================================================
-
-// Rota para LISTAR ENCARTES ATIVOS
-app.get('/api/encartes', async (req, res) => {
-    try {
-        // Retorna todos os encartes na ordem de upload (ou seja, a ordem da lista)
-        // LRANGE ENCARTES_KEY 0 -1
-        const activeEncartesUrls = await redis.lrange(ENCARTES_KEY, 0, -1);
-        
-        // Retorna a lista no formato que o cliente espera
-        const encartes = activeEncartesUrls.map(url => ({ url }));
-
-        console.log(`🖼️ Listagem de Encartes: ${encartes.length} encontrados.`);
-        return res.json(encartes);
-
-    } catch (error) {
-        console.error('❌ Erro ao listar encartes:', error);
-        return res.status(500).json({ error: 'Falha ao listar encartes.' });
-    }
-});
-
-
-// Rota para UPLOAD DE NOVO ENCARTE
-app.post('/api/encartes', upload.single('encarteImage'), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'Nenhuma imagem enviada.' });
-        }
-
-        const base64Image = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
-
-        // 1. Upload para o Cloudinary na pasta dedicada
-        const uploadResult = await cloudinary.uploader.upload(base64Image, {
-            folder: ENCARTE_FOLDER, // Usa a nova pasta
-            resource_type: 'image'
-        });
-
-        const encarteUrl = uploadResult.secure_url;
-
-        // 2. Adiciona ao Redis na chave de encartes (Lista)
-        // LPUSH adiciona no início da lista (mais recente primeiro)
-        await redis.lpush(ENCARTES_KEY, encarteUrl);
-
-        console.log(`✨ Novo Encarte ADICIONADO: ${encarteUrl}`);
-        return res.status(201).json({ 
-            message: 'Encarte enviado e ativado com sucesso!', 
-            url: encarteUrl,
-            public_id: uploadResult.public_id
-        });
-
-    } catch (error) {
-        console.error('❌ Erro ao enviar encarte:', error);
-        return res.status(500).json({ error: 'Falha ao enviar encarte.' });
-    }
-});
-
-
-// Rota para EXCLUIR ENCARTE
-app.delete('/api/encartes/:url', async (req, res) => {
-    const url = decodeURIComponent(req.params.url);
-
-    try {
-        // 1. Tenta remover do Redis (Lista). LREM remove a primeira ocorrência do valor.
-        const redisRemovedCount = await redis.lrem(ENCARTES_KEY, 1, url);
-        
-        if (redisRemovedCount === 0) {
-            console.warn(`⚠️ Redis: Encarte ${url} não encontrado na lista para exclusão.`);
-        }
-        
-        let publicId;
-        
-        try {
-            // Extrai o public ID do Cloudinary
-            const parts = url.split('/');
-            const filenameWithExt = parts[parts.length - 1];
-            publicId = `${ENCARTE_FOLDER}/${filenameWithExt.split('.')[0]}`;
-        } catch (e) {
-             console.warn(`⚠️ Cloudinary: Falha ao extrair ID para exclusão. URL: ${url}`);
-             return res.status(200).json({ message: 'Encarte removido do Redis, mas falhou ao extrair o ID para exclusão no Cloudinary.', url, redisRemovedCount });
-        }
-
-        // 2. Deleta do Cloudinary
-        const destroyResult = await cloudinary.uploader.destroy(publicId); 
-        
-        let cloudinaryStatus = destroyResult.result;
-        
-        if (cloudinaryStatus === 'not found') {
-             console.warn(`⚠️ Cloudinary: Arquivo ${publicId} não encontrado na nuvem, mas removido do Redis.`);
-             cloudinaryStatus = 'removed_from_redis_only (file_not_found_on_cloud)';
-        } else if (cloudinaryStatus !== 'ok') {
-            console.error('❌ Erro ao deletar no Cloudinary:', destroyResult);
-            return res.status(200).json({ message: 'Encarte removido do Redis, mas houve um erro na exclusão do Cloudinary.', url, cloudinaryStatus });
-        }
-
-
-        console.log(`🔥 Encarte EXCLUÍDO permanentemente: ${url}`);
-        return res.json({ message: 'Encarte excluído com sucesso.', url, redisRemovedCount, cloudinaryStatus: 'ok' });
-
-    } catch (error) {
-        console.error('❌ Erro ao excluir encarte:', error);
-        return res.status(500).json({ error: 'Falha ao excluir encarte.' });
-    }
-});
-
-
 // ------------------------------------------------------------------------
-// --- 6. EXPORTAÇÃO VERCEL ---
+// --- 5. EXPORTAÇÃO VERCEL ---
 // ------------------------------------------------------------------------
-
-// Listen para ambiente de desenvolvimento
-const PORT = process.env.PORT || 3000;
-if (process.env.NODE_ENV !== 'production') {
-    app.listen(PORT, () => {
-        console.log(`🚀 Servidor rodando em http://localhost:${PORT}`);
-    });
-}
-
-// Exportação Vercel (mantenha inalterado)
 module.exports = app;
