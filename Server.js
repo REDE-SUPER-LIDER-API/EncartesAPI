@@ -102,6 +102,73 @@ const getActiveBannersOrdered = async () => {
     return bannersWithPosition;
 };
 
+/**
+ * Exclui permanentemente TODOS os banners do Redis e Cloudinary.
+ */
+const deleteAllBanners = async () => {
+    console.log('⏳ Iniciando exclusão de todos os encartes agendada...');
+
+    try {
+        // 1. Obter todas as URLs ativas e desativadas do Redis
+        const activeBanners = await getActiveBannersOrdered();
+        const disabledUrls = await redis.smembers(DISABLED_BANNERS_KEY);
+
+        const allUrls = [
+            ...activeBanners.map(b => b.url),
+            ...disabledUrls
+        ];
+        
+        if (allUrls.length === 0) {
+            console.log('✅ Nenhum encarte encontrado no Redis para exclusão.');
+            return { message: 'Nenhum encarte para exclusão.', deletedCount: 0 };
+        }
+
+        let cloudinaryDeletedCount = 0;
+        let errors = [];
+
+        // 2. Excluir no Cloudinary
+        for (const url of allUrls) {
+            const publicId = extractPublicIdFromUrl(url);
+
+            if (publicId) {
+                try {
+                    const destroyResult = await cloudinary.uploader.destroy(publicId);
+                    if (destroyResult.result === 'ok') {
+                        cloudinaryDeletedCount++;
+                    } else if (destroyResult.result !== 'not found') {
+                         console.warn(`⚠️ Cloudinary: Falha ao deletar ${publicId}. Resultado: ${destroyResult.result}`);
+                         errors.push({ url, status: 'cloudinary_error', result: destroyResult.result });
+                    }
+                } catch (e) {
+                    console.error(`❌ Erro de API ao deletar no Cloudinary (${publicId}):`, e.message);
+                    errors.push({ url, status: 'cloudinary_api_error', details: e.message });
+                }
+            } else {
+                console.warn(`⚠️ Falha ao extrair public_id da URL: ${url}. Ignorando exclusão no Cloudinary.`);
+                errors.push({ url, status: 'invalid_public_id' });
+            }
+        }
+        
+        // 3. Limpar os registros no Redis
+        // Como todos os encartes foram apagados, podemos limpar as chaves.
+        await redis.del(ACTIVE_BANNERS_KEY);
+        await redis.del(DISABLED_BANNERS_KEY);
+        
+        console.log(`✅ Exclusão de encartes concluída. Total deletado (Cloudinary): ${cloudinaryDeletedCount}. Total de URLs no Redis antes: ${allUrls.length}`);
+        
+        return { 
+            message: 'Todos os encartes e seus registros no Redis foram excluídos.',
+            totalUrls: allUrls.length,
+            deletedCloudinaryCount: cloudinaryDeletedCount,
+            errors: errors.length > 0 ? errors : undefined
+        };
+
+    } catch (error) {
+        console.error('❌ Erro FATAL na exclusão de todos os encartes:', error);
+        throw new Error('Falha no processo de exclusão em massa.');
+    }
+};
+
 
 // ------------------------------------------------------------------------
 // --- 4. ROTAS ---
@@ -368,6 +435,20 @@ app.delete('/api/encarte', async (req, res) => {
     } catch (error) {
         console.error('❌ Erro ao excluir banner:', error);
         return res.status(500).json({ error: 'Falha ao excluir banner.' });
+    }
+});
+
+/**
+ * POST /api/encarte/cleanup: Rota REST para acionar a exclusão de todos os banners.
+ * Esta rota será chamada pelo Cron Job do Vercel.
+ */
+app.post('/api/encarte/cleanup', async (req, res) => {
+    try {
+        const result = await deleteAllBanners();
+        res.json(result);
+    } catch (error) {
+        console.error('❌ Falha na rota de limpeza:', error);
+        res.status(500).json({ error: error.message });
     }
 });
 
