@@ -1,0 +1,9 @@
+{
+    "version": 2,
+    "routes": [
+        {
+            "src": "/image/(.*)",
+            "dest": "/api/image?imageId=$1"
+        }
+    ]
+}

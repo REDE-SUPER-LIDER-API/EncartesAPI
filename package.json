@@ -1,6 +1,22 @@
 {
-  "type": "module",
+  "name": "cloudinary-upstash-vercel-api",
+  "version": "1.0.0",
+  "description": "API para visualização de imagens do Cloudinary e metadados do Upstash no Vercel.",
+  "main": "api/image.js",
+  "scripts": {
+    "start": "node api/image.js"
+  },
   "dependencies": {
-    "cloudinary": "^2.8.0"
-  }
+    "express": "^4.18.2",
+    "redis": "^4.6.13"
+  },
+  "keywords": [
+    "vercel",
+    "express",
+    "serverless",
+    "redis",
+    "upstash"
+  ],
+  "author": "",
+  "license": "ISC"
 }
