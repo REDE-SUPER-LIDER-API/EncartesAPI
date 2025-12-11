@@ -306,10 +306,11 @@ app.put('/api/encarte/reorder', async (req, res) => {
         }
         
         // O ZADD com novos scores atualiza a posição dos membros existentes.
-        const updatedCount = await redis.zadd(ACTIVE_BANNERS_KEY, ...updates);
+        // O comando spread (...) garante que os elementos do array updates sejam passados como argumentos individuais.
+        await redis.zadd(ACTIVE_BANNERS_KEY, ...updates);
 
-        console.log(`✨ Reordenação concluída. ${updatedCount} banners atualizados.`);
-        return res.json({ message: 'Ordem dos banners atualizada com sucesso.', updatedCount });
+        console.log(`✨ Reordenação concluída. ${updates.length} banners atualizados.`);
+        return res.json({ message: 'Ordem dos banners atualizada com sucesso.', updatedCount: updates.length });
 
     } catch (error) {
         console.error('❌ Erro ao reordenar banners no Redis:', error);
@@ -368,6 +369,67 @@ app.delete('/api/encarte', async (req, res) => {
     } catch (error) {
         console.error('❌ Erro ao excluir banner:', error);
         return res.status(500).json({ error: 'Falha ao excluir banner.' });
+    }
+});
+
+
+// ------------------------------------------------------------------------
+// --- 4.1. FUNÇÃO DE LIMPEZA PROGRAMADA ---
+// ------------------------------------------------------------------------
+
+/**
+ * Exclui todos os banners (ativos e desativados) do Redis e remove todos
+ * os arquivos associados no Cloudinary usando a tag.
+ */
+const deleteAllBanners = async () => {
+    try {
+        console.log('⏳ Iniciando limpeza automática de todos os banners...');
+
+        // 1. Limpeza no Cloudinary: Deleta todos os recursos com a tag definida
+        // Esta é a forma mais eficiente de apagar em massa.
+        const cloudinaryDeleteResult = await cloudinary.api.delete_resources_by_tag(FOLDER_TAG, { 
+            resource_type: 'image'
+        });
+
+        const deletedCount = cloudinaryDeleteResult.deleted ? Object.keys(cloudinaryDeleteResult.deleted).length : 0;
+        
+        console.log(`🗑️ Cloudinary: ${deletedCount} recursos excluídos pela tag '${FOLDER_TAG}'.`);
+
+        // 2. Limpeza no Redis: Deleta as chaves inteiras para remover todos os dados
+        // Remove as chaves de banners ativos e desativados de uma só vez.
+        const redisDeleteResult = await redis.del(ACTIVE_BANNERS_KEY, DISABLED_BANNERS_KEY);
+        
+        if (redisDeleteResult > 0) {
+            console.log('🔥 Redis: Chaves de banners ativos e desativados foram apagadas.');
+        } else {
+             console.log('⚠️ Redis: As chaves de banners não existiam ou não foram apagadas.');
+        }
+
+        console.log('✅ Limpeza concluída com sucesso.');
+        return { 
+            message: 'Limpeza automática diária concluída.',
+            redisKeysDeleted: redisDeleteResult,
+            cloudinaryResourcesDeleted: deletedCount
+        };
+
+    } catch (error) {
+        console.error('❌ ERRO CRÍTICO na Limpeza Automática:', error);
+        // Lançar o erro para que o endpoint possa capturá-lo
+        throw new Error(`Falha na limpeza: ${error.message}`);
+    }
+};
+
+/**
+ * POST /api/cleanup: Rota para ser chamada pelo Cron Job do Vercel.
+ * Realiza a exclusão total de todos os encartes.
+ */
+app.post('/api/cleanup', async (req, res) => {
+    try {
+        const result = await deleteAllBanners();
+        return res.status(200).json(result);
+    } catch (error) {
+        // Tratamento do erro lançado pela função
+        return res.status(500).json({ error: 'Falha ao executar a limpeza programada.', details: error.message });
     }
 });
 
