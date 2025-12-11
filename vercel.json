@@ -23,7 +23,7 @@
   "crons": [
     {
       "path": "/api/cleanup",
-      "schedule": "6 15 * * *" 
+      "schedule": "8 18 * * *" 
     }
   ]
 }
