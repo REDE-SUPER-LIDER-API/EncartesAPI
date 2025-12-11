@@ -374,6 +374,92 @@ app.delete('/api/encarte', async (req, res) => {
 
 
 // ------------------------------------------------------------------------
+// --- ROTA DE LIMPEZA AUTOMÁTICA (CRON VERCEL) ---
+// ------------------------------------------------------------------------
+
+/**
+ * POST /api/encarte/cleanup: Rota chamada pelo Cron Job do Vercel para executar a limpeza.
+ * Exclui permanentemente todos os banners que estão na lista de DESATIVADOS.
+ */
+app.post('/api/encarte/cleanup', async (req, res) => {
+    // 1. Verificação de Chave Secreta (Necessita da variável de ambiente CLEANUP_SECRET_KEY)
+    const SECRET_KEY = process.env.CLEANUP_SECRET_KEY;
+    // O Vercel envia a chave secreta no cabeçalho 'Authorization' como 'Bearer [chave]'
+    const receivedKey = req.headers['authorization']; 
+    
+    const token = receivedKey ? receivedKey.replace('Bearer ', '') : null;
+
+    if (!SECRET_KEY || token !== SECRET_KEY) {
+        console.warn('❌ Tentativa de acesso não autorizado à rota de limpeza.');
+        return res.status(401).json({ error: 'Acesso Não Autorizado. Chave Secreta Inválida.' });
+    }
+
+    // --- LÓGICA DE EXCLUSÃO AUTOMÁTICA ---
+    try {
+        const disabledUrls = await redis.smembers(DISABLED_BANNERS_KEY);
+        let deletedCount = 0;
+        let errors = 0;
+        let skippedCount = 0;
+
+        if (disabledUrls.length === 0) {
+            console.log("🧹 Cleanup: Nenhum banner desativado para exclusão.");
+            return res.status(200).json({ 
+                message: 'Limpeza de banners desativados executada. Nenhum banner encontrado para exclusão.',
+                banners_deleted: 0,
+                errors_count: 0
+            });
+        }
+        
+        // Processa as exclusões em paralelo para maior eficiência
+        const deletionPromises = disabledUrls.map(async (url) => {
+            try {
+                // Tenta remover do Redis
+                const removedFromDisabled = await redis.srem(DISABLED_BANNERS_KEY, url);
+                
+                if (removedFromDisabled === 0) {
+                    skippedCount++;
+                    return; 
+                }
+
+                // Tenta excluir do Cloudinary
+                const publicId = extractPublicIdFromUrl(url);
+                if (publicId) {
+                    const destroyResult = await cloudinary.uploader.destroy(publicId); 
+                    if (destroyResult.result === 'ok' || destroyResult.result === 'not found') {
+                         deletedCount++;
+                    } else {
+                        console.error(`❌ Cloudinary: Erro ao deletar ${publicId}:`, destroyResult);
+                        errors++;
+                    }
+                } else {
+                    console.error(`⚠️ Cleanup: Falha ao extrair public_id de: ${url}. Apenas remoção do Redis realizada.`);
+                    deletedCount++; 
+                }
+
+            } catch (innerError) {
+                console.error(`❌ Cleanup: Erro geral ao deletar o banner ${url}:`, innerError.message);
+                errors++;
+            }
+        });
+
+        await Promise.all(deletionPromises);
+        
+        console.log(`🧹 Tarefa de limpeza concluída. Banners excluídos: ${deletedCount}. Erros: ${errors}. Skipped: ${skippedCount}.`);
+        
+        return res.json({ 
+            message: 'Limpeza de banners desativados executada com sucesso.',
+            banners_deleted: deletedCount,
+            errors_count: errors
+        });
+
+    } catch (error) {
+        console.error('❌ Erro na rota de limpeza:', error);
+        return res.status(500).json({ error: 'Falha ao executar a rotina de limpeza.' });
+    }
+});
+
+
+// ------------------------------------------------------------------------
 // --- 5. EXPORTAÇÃO VERCEL ---
 // ------------------------------------------------------------------------
 module.exports = app;
