@@ -127,9 +127,9 @@ const getActiveBannersOrdered = async () => {
 // ------------------------------------------------------------------------
 
 /**
- * POST /api/banners: Upload de imagem para o Cloudinary e ativação no Redis.
+ * POST /api/encarte: Upload de imagem para o Cloudinary e ativação no Redis.
  */
-app.post('/api/banners', upload.single('bannerImage'), async (req, res) => {
+app.post('/api/encarte', upload.single('bannerImage'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
     }
@@ -180,9 +180,9 @@ app.post('/api/banners', upload.single('bannerImage'), async (req, res) => {
 });
 
 /**
- * GET /api/banners: Lista todos os banners ATIVOS *PARA O DIA ATUAL* e ordenados.
+ * GET /api/encarte: Lista todos os banners ATIVOS *PARA O DIA ATUAL* e ordenados.
  */
-app.get('/api/banners', async (req, res) => {
+app.get('/api/encarte', async (req, res) => {
     try {
         const today = new Date().getDay(); // 0=Dom, 1=Seg, ..., 6=Sáb
         const todayKey = DAYS_MAP[today]; // 'SUN', 'MON', etc.
@@ -209,9 +209,9 @@ app.get('/api/banners', async (req, res) => {
 });
 
 /**
- * GET /api/banners/all: Lista todos os banners ATIVOS *com a regra de dia* e posição. (Para o Dashboard)
+ * GET /api/encarte/all: Lista todos os banners ATIVOS *com a regra de dia* e posição. (Para o Dashboard)
  */
-app.get('/api/banners/all', async (req, res) => {
+app.get('/api/encarte/all', async (req, res) => {
     try {
         // Retorna a lista de objetos {url, day, position}
         const activeBanners = await getActiveBannersOrdered(); 
@@ -229,9 +229,9 @@ app.get('/api/banners/all', async (req, res) => {
 });
 
 /**
- * GET /api/banners/disabled: Lista todos os banners DESATIVADOS.
+ * GET /api/encarte/disabled: Lista todos os banners DESATIVADOS.
  */
-app.get('/api/banners/disabled', async (req, res) => {
+app.get('/api/encarte/disabled', async (req, res) => {
     try {
         const disabledUrls = await redis.smembers(DISABLED_BANNERS_KEY);
         if (disabledUrls.length === 0) {
@@ -246,9 +246,9 @@ app.get('/api/banners/disabled', async (req, res) => {
 });
 
 /**
- * PUT /api/banners/disable: Move um banner de ativo para desativado no Redis.
+ * PUT /api/encarte/disable: Move um banner de ativo para desativado no Redis.
  */
-app.put('/api/banners/disable', async (req, res) => {
+app.put('/api/encarte/disable', async (req, res) => {
     const { url } = req.body; 
 
     if (!url) {
@@ -285,9 +285,9 @@ app.put('/api/banners/disable', async (req, res) => {
 
 
 /**
- * PUT /api/banners/enable: Move um banner de desativado para ativo no Redis, definindo o dia.
+ * PUT /api/encarte/enable: Move um banner de desativado para ativo no Redis, definindo o dia.
  */
-app.put('/api/banners/enable', async (req, res) => {
+app.put('/api/encarte/enable', async (req, res) => {
     const { url, day } = req.body;
     
     // Dia padrão é 'ALL' se não for fornecido
@@ -331,9 +331,9 @@ app.put('/api/banners/enable', async (req, res) => {
 });
 
 /**
- * PUT /api/banners/update-day: Atualiza o dia de exibição de um banner ATIVO.
+ * PUT /api/encarte/update-day: Atualiza o dia de exibição de um banner ATIVO.
  */
-app.put('/api/banners/update-day', async (req, res) => {
+app.put('/api/encarte/update-day', async (req, res) => {
     const { url, day } = req.body;
     
     const targetDay = day ? day.toUpperCase() : 'ALL';
@@ -364,10 +364,10 @@ app.put('/api/banners/update-day', async (req, res) => {
 });
 
 /**
- * PUT /api/banners/reorder: Atualiza a ordem dos banners ativos.
+ * PUT /api/encarte/reorder: Atualiza a ordem dos banners ativos.
  * Recebe uma lista de URLs na ordem desejada.
  */
-app.put('/api/banners/reorder', async (req, res) => {
+app.put('/api/encarte/reorder', async (req, res) => {
     const { orderedUrls } = req.body;
 
     if (!Array.isArray(orderedUrls)) {
@@ -401,9 +401,9 @@ app.put('/api/banners/reorder', async (req, res) => {
 
 
 /**
- * DELETE /api/banners: Exclui permanentemente o banner do Redis e Cloudinary.
+ * DELETE /api/encarte: Exclui permanentemente o banner do Redis e Cloudinary.
  */
-app.delete('/api/banners', async (req, res) => {
+app.delete('/api/encarte', async (req, res) => {
     const { url } = req.body;
 
     if (!url) {

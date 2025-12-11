@@ -8,6 +8,10 @@
   ],
   "routes": [
     {
+      "src": "/api/encarte(.*)",
+      "dest": "Server.js"
+    },
+    {
       "src": "/(.*)",
       "dest": "Server.js"
     }
