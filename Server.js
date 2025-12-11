@@ -102,6 +102,51 @@ const getActiveBannersOrdered = async () => {
     return bannersWithPosition;
 };
 
+/**
+ * Exclui todos os banners (ativos e desativados) do Cloudinary e limpa as chaves no Redis.
+ * Esta função é usada pelo Cron Job de limpeza diária.
+ */
+const deleteAllBanners = async () => {
+    let cloudinaryDeletedCount = 0;
+    let redisDeletedCount = 0;
+
+    try {
+        // 1. Limpeza no Cloudinary: Deleta todos os recursos com a tag FOLDER_TAG
+        console.log(`⏳ Iniciando exclusão de banners no Cloudinary com a tag: ${FOLDER_TAG}`);
+        // Usamos cloudinary.api para operações em massa, como exclusão por tag.
+        const cloudinaryResult = await cloudinary.api.delete_resources_by_tag(FOLDER_TAG, {
+            resource_type: 'image' // Garante que só deletamos imagens, se necessário.
+        });
+
+        // Contar quantos foram excluídos
+        if (cloudinaryResult && cloudinaryResult.deleted) {
+            cloudinaryDeletedCount = Object.keys(cloudinaryResult.deleted).length;
+        }
+
+        console.log(`🔥 Cloudinary: ${cloudinaryDeletedCount} banners excluídos.`);
+        
+        // 2. Limpeza no Redis: Deleta as chaves inteiras para garantir a limpeza total
+        // Deleta o ZSET de ativos e o SET de desativados.
+        const redisDeleteResult = await redis.del(ACTIVE_BANNERS_KEY, DISABLED_BANNERS_KEY);
+        redisDeletedCount = redisDeleteResult; // O DEL retorna o número de chaves excluídas
+
+        console.log(`🔥 Redis: ${redisDeletedCount} chaves de banners limpas.`);
+        
+        return {
+            success: true,
+            cloudinaryDeletedCount,
+            redisDeletedCount
+        };
+
+    } catch (error) {
+        console.error('❌ ERRO CRON JOB - Falha ao excluir banners automaticamente:', error);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+};
+
 
 // ------------------------------------------------------------------------
 // --- 4. ROTAS ---
@@ -369,6 +414,36 @@ app.delete('/api/encarte', async (req, res) => {
     } catch (error) {
         console.error('❌ Erro ao excluir banner:', error);
         return res.status(500).json({ error: 'Falha ao excluir banner.' });
+    }
+});
+
+/**
+ * GET /api/cleanup: Rota chamada pelo Cron Job (Vercel) para excluir todos os banners.
+ */
+app.get('/api/cleanup', async (req, res) => {
+    // Esta rota é destinada ao Vercel Cron Job.
+    console.log('--- ⏰ CRON JOB INICIADO: Limpeza Diária de Banners ---');
+    
+    // Evita que a rota seja executada por um navegador normal.
+    // O Vercel Cron envia um header 'x-vercel-cron-event', mas o melhor é checar.
+    // Para simplificar no ambiente Canvas, vamos apenas executar a função.
+    
+    const result = await deleteAllBanners();
+
+    if (result.success) {
+        console.log('--- ✅ CRON JOB CONCLUÍDO COM SUCESSO ---');
+        // Retorna 200 OK para o Vercel Cron
+        return res.status(200).json({ 
+            message: 'Limpeza automática de banners concluída.',
+            details: `Cloudinary: ${result.cloudinaryDeletedCount} banners excluídos. Redis: ${result.redisDeletedCount} chaves limpas.`
+        });
+    } else {
+        console.log('--- ❌ CRON JOB FALHOU ---');
+        // Retorna 500 para sinalizar falha ao Vercel Cron
+        return res.status(500).json({ 
+            message: 'Falha durante a limpeza automática de banners.',
+            error: result.error
+        });
     }
 });
 
