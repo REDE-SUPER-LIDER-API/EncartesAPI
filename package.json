@@ -2,9 +2,9 @@
   "name": "vercel-cloudinary-upstash-api",
   "version": "1.0.0",
   "description": "API para listar imagens e metadados",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "cloudinary": "^1.41.0",

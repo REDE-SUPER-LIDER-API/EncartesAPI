@@ -1,4 +1,4 @@
-// index.js (Arquivo na raiz do projeto)
+// server.js (Arquivo na raiz do projeto)
 
 // Importações
 const cloudinary = require('cloudinary').v2;
