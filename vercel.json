@@ -1,21 +1,16 @@
+
 {
   "version": 2,
   "builds": [
-    {
-      "src": "Server.js",
-      "use": "@vercel/node"
-    }
+
   ],
   "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "Server.js"
-    }
+  
   ],
   "crons": [
     {
-      "path": "/api/encartes/cleanup",
-      "schedule": "0 3 * * *" 
+      "path": "/api/banners/cleanup",
+      "schedule": "0 0 * * *" 
     }
   ]
 }
