@@ -1,9 +1,15 @@
 {
-    "version": 2,
-    "routes": [
-        {
-            "src": "/image/(.*)",
-            "dest": "/api/image?imageId=$1"
-        }
-    ]
+  "version": 2,
+  "builds": [
+    {
+      "src": "Server.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "Server.js"
+    }
+  ]
 }

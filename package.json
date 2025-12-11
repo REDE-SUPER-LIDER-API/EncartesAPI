@@ -1,22 +1,23 @@
 {
-  "name": "cloudinary-upstash-vercel-api",
+  "name": "banner-server",
   "version": "1.0.0",
-  "description": "API para visualização de imagens do Cloudinary e metadados do Upstash no Vercel.",
-  "main": "api/image.js",
+  "description": "",
+  "main": "Server.js",
   "scripts": {
-    "start": "node api/image.js"
+    "start": "node Server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "dependencies": {
-    "express": "^4.18.2",
-    "redis": "^4.6.13"
-  },
-  "keywords": [
-    "vercel",
-    "express",
-    "serverless",
-    "redis",
-    "upstash"
-  ],
+  "keywords": [],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.1.0",
+    "cors": "^2.8.5",
+    "cloudinary": "^2.0.0",
+    "multer": "^1.4.5-lts.1",
+    "@upstash/redis": "^1.28.2"
+  },
+  "devDependencies": {
+    "@vercel/node": "^3.1.5"
+  }
 }
