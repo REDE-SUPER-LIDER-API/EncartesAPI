@@ -23,12 +23,17 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// Chaves Redis
+// Chaves Redis - BANNERS
 const ACTIVE_BANNERS_KEY = 'active_banners_ordered'; 
 const BANNER_DAYS_KEY = 'banner_day_rules'; 
 const DISABLED_BANNERS_KEY = 'disabled_banner_urls'; 
 const CLOUDINARY_FOLDER = 'banners_folder'; 
 const FOLDER_TAG = 'banners_tag'; 
+
+// Chaves Redis - ENCARTES (NOVO)
+const ACTIVE_ENCARTES_KEY = 'active_encartes_set'; // Usamos um SET para encartes
+const CLOUDINARY_ENCARTES_FOLDER = 'encartes_folder'; 
+const ENCARTE_TAG = 'encartes_tag'; 
 
 // Mapeamento de Dias da Semana (0=Dom, 6=Sáb) para chaves
 const DAYS_MAP = {
@@ -67,11 +72,19 @@ const upload = multer({ storage: storage });
  */
 const extractPublicIdFromUrl = (url) => {
     try {
-        // Encontra o index da pasta no caminho
-        const folderIndex = url.indexOf(`/${CLOUDINARY_FOLDER}/`);
+        // Tenta encontrar a pasta de BANNERS
+        let folder = CLOUDINARY_FOLDER;
+        let folderIndex = url.indexOf(`/${folder}/`);
+
+        // Se não for BANNERS, tenta a pasta de ENCARTES
+        if (folderIndex === -1) {
+            folder = CLOUDINARY_ENCARTES_FOLDER;
+            folderIndex = url.indexOf(`/${folder}/`);
+        }
+        
         if (folderIndex === -1) return null;
         
-        // Extrai a parte do caminho após a pasta (incluindo o CLOUDINARY_FOLDER)
+        // Extrai a parte do caminho após a pasta (incluindo a pasta)
         let publicIdPath = url.substring(folderIndex + 1);
         
         // Remove a extensão do arquivo (ex: .png)
@@ -116,9 +129,31 @@ const getActiveBannersOrdered = async () => {
     }));
 };
 
+/**
+ * Calcula o tempo de vida (TTL) em segundos até a próxima meia-noite (00:00).
+ * Isso garante que os encartes expirem diariamente.
+ * @returns {number} O TTL em segundos.
+ */
+const getTTLUntilNextMidnight = () => {
+    const now = new Date();
+    // Cria uma data para a meia-noite do dia seguinte
+    const nextMidnight = new Date(now);
+    nextMidnight.setDate(now.getDate() + 1);
+    nextMidnight.setHours(0, 0, 0, 0);
+
+    // Diferença em milissegundos
+    const diffMs = nextMidnight.getTime() - now.getTime();
+    
+    // Converte para segundos (arredondado para cima)
+    const ttlSeconds = Math.ceil(diffMs / 1000);
+    
+    console.log(`⏰ Próximo Meia-Noite em: ${ttlSeconds} segundos.`);
+    return ttlSeconds;
+};
+
 
 // ------------------------------------------------------------------------
-// --- 4. ROTAS ---
+// --- 4. ROTAS DE BANNERS ---
 // ------------------------------------------------------------------------
 
 /**
@@ -447,6 +482,79 @@ app.delete('/api/banners', async (req, res) => {
 
 
 // ------------------------------------------------------------------------
-// --- 5. EXPORTAÇÃO VERCEL ---
+// --- 5. ROTAS DE ENCARTES (NOVO) ---
+// ------------------------------------------------------------------------
+
+/**
+ * POST /api/encartes: Upload de imagem para o Cloudinary e ativação no Redis com TTL.
+ * Rota para o "dashboard de adição de encartes".
+ */
+app.post('/api/encartes', upload.single('encarteImage'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'Nenhum arquivo de encarte enviado.' });
+    }
+
+    try {
+        const b64 = Buffer.from(req.file.buffer).toString("base64");
+        const dataURI = `data:${req.file.mimetype};base64,${b64}`;
+
+        // 1. Upload para o Cloudinary
+        const result = await cloudinary.uploader.upload(dataURI, {
+            folder: CLOUDINARY_ENCARTES_FOLDER, 
+            tags: [ENCARTE_TAG]        
+        });
+        
+        const encarteUrl = result.secure_url;
+        const ttlSeconds = getTTLUntilNextMidnight(); // Calcula o TTL até a próxima meia-noite
+
+        // 2. Adiciona a URL ao SET de encartes ativos e define o TTL
+        const [addedToSet, setTtlResult] = await Promise.all([
+            redis.sadd(ACTIVE_ENCARTES_KEY, encarteUrl),
+            redis.expire(ACTIVE_ENCARTES_KEY, ttlSeconds)
+        ]);
+        
+        // Verifica se o TTL foi aplicado com sucesso (o Redis retorna 1 para sucesso)
+        if (setTtlResult !== 1) {
+             console.warn(`⚠️ Falha ao definir TTL para ${ACTIVE_ENCARTES_KEY}. A expiração automática pode falhar.`);
+        }
+
+        console.log(`✅ Encarte ${result.public_id} ativado com TTL de ${ttlSeconds} segundos.`);
+        res.status(201).json({ 
+            message: 'Upload bem-sucedido e encarte ativado com expiração à meia-noite!', 
+            url: encarteUrl,
+            expires_in_seconds: ttlSeconds
+        });
+
+    } catch (error) {
+        console.error('❌ Erro ao processar upload de encarte:', error);
+        return res.status(500).json({ error: 'Falha ao fazer upload do encarte.', details: error.message });
+    }
+});
+
+
+/**
+ * GET /api/encartes: Lista todos os encartes ATIVOS (e que não expiraram).
+ */
+app.get('/api/encartes', async (req, res) => {
+    try {
+        // SMEMBERS retorna todos os membros do SET
+        const activeEncartes = await redis.smembers(ACTIVE_ENCARTES_KEY);
+        
+        if (activeEncartes.length === 0) {
+            console.log("ℹ️ Nenhum encarte ativo encontrado.");
+        }
+
+        // O TTL garante que o SET esteja "vazio" (expirado) após a meia-noite.
+        res.json({ encartes: activeEncartes });
+        
+    } catch (error) {
+        console.error('❌ Erro ao carregar encartes ativos do Redis:', error);
+        return res.status(500).json({ error: 'Falha ao carregar encartes ativos.' });
+    }
+});
+
+
+// ------------------------------------------------------------------------
+// --- 6. EXPORTAÇÃO VERCEL ---
 // ------------------------------------------------------------------------
 module.exports = app;
