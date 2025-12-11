@@ -67,7 +67,7 @@ const upload = multer({ storage: storage });
 /**
  * Extrai o 'public_id' completo (com a pasta) da URL do Cloudinary.
  * Ex: 'banners_folder/public_id_aqui'
- * @param {string} url - A URL completa do banner.
+ * @param {string} url - A URL completa do banner/encarte.
  * @returns {string | null} O public_id ou null em caso de falha.
  */
 const extractPublicIdFromUrl = (url) => {
@@ -550,6 +550,64 @@ app.get('/api/encartes', async (req, res) => {
     } catch (error) {
         console.error('❌ Erro ao carregar encartes ativos do Redis:', error);
         return res.status(500).json({ error: 'Falha ao carregar encartes ativos.' });
+    }
+});
+
+
+/**
+ * DELETE /api/encartes: Exclui permanentemente o encarte do Redis e Cloudinary.
+ * ROTA CORRIGIDA: Adicionada para exclusão manual.
+ */
+app.delete('/api/encartes', async (req, res) => {
+    const { url } = req.body;
+
+    if (!url) {
+        return res.status(400).json({ error: 'A URL do encarte é obrigatória para a exclusão.' });
+    }
+
+    try {
+        // 1. Tenta remover a URL do SET de encartes ativos no Redis
+        const removedFromActive = await redis.srem(ACTIVE_ENCARTES_KEY, url);
+        
+        if (removedFromActive === 0) {
+            return res.status(404).json({ error: 'Encarte não encontrado na lista de ativos do Redis.' });
+        }
+
+        // 2. Extrai o public_id (A função extractPublicIdFromUrl suporta a pasta 'encartes_folder')
+        const publicId = extractPublicIdFromUrl(url);
+
+        if (!publicId) {
+             console.error(`⚠️ Falha ao extrair public_id de: ${url}. Apenas remoção do Redis realizada.`);
+             return res.status(200).json({ 
+                 message: 'Encarte removido do Redis, mas falhou ao extrair o ID para exclusão no Cloudinary.', 
+                 url, 
+                 redisRemoved: 1
+             });
+        }
+
+        // 3. Deleta do Cloudinary
+        const destroyResult = await cloudinary.uploader.destroy(publicId); 
+        
+        let cloudinaryStatus = destroyResult.result;
+        
+        if (cloudinaryStatus === 'not found') {
+             console.warn(`⚠️ Cloudinary: Arquivo ${publicId} não encontrado na nuvem, mas removido do Redis.`);
+             cloudinaryStatus = 'removed_from_redis_only (file_not_found_on_cloud)';
+        } else if (cloudinaryStatus !== 'ok') {
+            console.error('❌ Erro ao deletar no Cloudinary:', destroyResult);
+            return res.status(200).json({ 
+                message: 'Encarte removido do Redis, mas houve um erro na exclusão do Cloudinary.', 
+                url, 
+                cloudinaryStatus 
+            });
+        }
+
+        console.log(`🔥 Encarte EXCLUÍDO permanentemente: ${url}`);
+        return res.json({ message: 'Encarte excluído com sucesso.', url, redisRemoved: 1, cloudinaryStatus: 'ok' });
+
+    } catch (error) {
+        console.error('❌ Erro ao excluir encarte:', error);
+        return res.status(500).json({ error: 'Falha ao excluir encarte.' });
     }
 });
 
