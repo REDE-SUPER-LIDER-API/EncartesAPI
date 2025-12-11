@@ -8,11 +8,11 @@
   ],
   "routes": [
     {
-      "src": "/api/encarte(.*)",
+      "src": "/api/cleanup",
       "dest": "Server.js"
     },
     {
-      "src": "/api/cleanup",
+      "src": "/api/encarte(.*)",
       "dest": "Server.js"
     },
     {
@@ -23,7 +23,8 @@
   "crons": [
     {
       "path": "/api/cleanup",
-      "schedule": "18 18 * * *" 
+      "schedule": "24 18 * * *" 
+
     }
   ]
 }
