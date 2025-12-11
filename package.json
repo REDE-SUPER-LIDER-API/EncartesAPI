@@ -1,5 +1,21 @@
 {
-  "version": 2,
+  "name": "banners-api",
+  "version": "1.0.0",
+  "description": "API para gestão de banners e encartes com Cloudinary e Redis/Upstash",
+  "main": "Server.js",
+  "scripts": {
+    "start": "node Server.js"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.28.3",
+    "cloudinary": "^1.41.3",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
+  },
   "builds": [
     {
       "src": "Server.js",
