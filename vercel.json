@@ -15,11 +15,5 @@
       "src": "/(.*)",
       "dest": "Server.js"
     }
-  ],
-  "crons": [
-    {
-      "path": "/api/encarte/cleanup",
-      "schedule": "33 17 * * *"
-    }
   ]
 }
