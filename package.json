@@ -1,23 +1,19 @@
 {
-  "name": "Encarte-server",
-  "version": "1.0.0",
-  "description": "",
-  "main": "Server.js",
-  "scripts": {
-    "start": "node Server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "express": "^5.1.0",
-    "cors": "^2.8.5",
-    "cloudinary": "^2.0.0",
-    "multer": "^1.4.5-lts.1",
-    "@upstash/redis": "^1.28.2"
-  },
-  "devDependencies": {
-    "@vercel/node": "^3.1.5"
-  }
+  "version": 2,
+  "builds": [
+    {
+      "src": "Server.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/encarte(.*)",
+      "dest": "Server.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "Server.js"
+    }
+  ]
 }
