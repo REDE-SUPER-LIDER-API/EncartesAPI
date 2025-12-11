@@ -1,35 +1,23 @@
 {
-  "name": "banners-api",
+  "name": "Encarte-server",
   "version": "1.0.0",
-  "description": "API para gestão de banners e encartes com Cloudinary e Redis/Upstash",
+  "description": "",
   "main": "Server.js",
   "scripts": {
-    "start": "node Server.js"
+    "start": "node Server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "@upstash/redis": "^1.28.3",
-    "cloudinary": "^1.41.3",
+    "express": "^5.1.0",
     "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "multer": "^1.4.5-lts.1"
+    "cloudinary": "^2.0.0",
+    "multer": "^1.4.5-lts.1",
+    "@upstash/redis": "^1.28.2"
   },
   "devDependencies": {
-    "nodemon": "^3.0.3"
-  },
-  "builds": [
-    {
-      "src": "Server.js",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/encarte(.*)",
-      "dest": "Server.js"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "Server.js"
-    }
-  ]
+    "@vercel/node": "^3.1.5"
+  }
 }

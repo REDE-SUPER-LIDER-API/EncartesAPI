@@ -1,4 +1,4 @@
-// server.js (Refatorado: Sem Logística de Dias e Sem Limpeza Automática)
+// server.js (Refatorado: Sem Logística de Dias)
 
 const express = require('express');
 const cors = require('cors');
@@ -374,87 +374,62 @@ app.delete('/api/encarte', async (req, res) => {
 
 
 // ------------------------------------------------------------------------
-// --- ROTA DE LIMPEZA AUTOMÁTICA (CRON VERCEL) ---
+// --- 4.1. FUNÇÃO DE LIMPEZA PROGRAMADA ---
 // ------------------------------------------------------------------------
 
 /**
- * POST /api/encarte/cleanup: Rota chamada pelo Cron Job do Vercel para executar a limpeza.
- * Exclui permanentemente todos os banners que estão na lista de DESATIVADOS.
+ * Exclui todos os banners (ativos e desativados) do Redis e remove todos
+ * os arquivos associados no Cloudinary usando a tag.
  */
-app.post('/api/encarte/cleanup', async (req, res) => {
-    // 1. Verificação de Chave Secreta (Necessita da variável de ambiente CLEANUP_SECRET_KEY)
-    const SECRET_KEY = process.env.CLEANUP_SECRET_KEY;
-    // O Vercel envia a chave secreta no cabeçalho 'Authorization' como 'Bearer [chave]'
-    const receivedKey = req.headers['authorization']; 
-    
-    const token = receivedKey ? receivedKey.replace('Bearer ', '') : null;
-
-    if (!SECRET_KEY || token !== SECRET_KEY) {
-        console.warn('❌ Tentativa de acesso não autorizado à rota de limpeza.');
-        return res.status(401).json({ error: 'Acesso Não Autorizado. Chave Secreta Inválida.' });
-    }
-
-    // --- LÓGICA DE EXCLUSÃO AUTOMÁTICA ---
+const deleteAllBanners = async () => {
     try {
-        const disabledUrls = await redis.smembers(DISABLED_BANNERS_KEY);
-        let deletedCount = 0;
-        let errors = 0;
-        let skippedCount = 0;
+        console.log('⏳ Iniciando limpeza automática de todos os banners...');
 
-        if (disabledUrls.length === 0) {
-            console.log("🧹 Cleanup: Nenhum banner desativado para exclusão.");
-            return res.status(200).json({ 
-                message: 'Limpeza de banners desativados executada. Nenhum banner encontrado para exclusão.',
-                banners_deleted: 0,
-                errors_count: 0
-            });
+        // 1. Limpeza no Cloudinary: Deleta todos os recursos com a tag definida
+        // Esta é a forma mais eficiente de apagar em massa.
+        const cloudinaryDeleteResult = await cloudinary.api.delete_resources_by_tag(FOLDER_TAG, { 
+            resource_type: 'image'
+        });
+
+        const deletedCount = cloudinaryDeleteResult.deleted ? Object.keys(cloudinaryDeleteResult.deleted).length : 0;
+        
+        console.log(`🗑️ Cloudinary: ${deletedCount} recursos excluídos pela tag '${FOLDER_TAG}'.`);
+
+        // 2. Limpeza no Redis: Deleta as chaves inteiras para remover todos os dados
+        // Remove as chaves de banners ativos e desativados de uma só vez.
+        const redisDeleteResult = await redis.del(ACTIVE_BANNERS_KEY, DISABLED_BANNERS_KEY);
+        
+        if (redisDeleteResult > 0) {
+            console.log('🔥 Redis: Chaves de banners ativos e desativados foram apagadas.');
+        } else {
+             console.log('⚠️ Redis: As chaves de banners não existiam ou não foram apagadas.');
         }
-        
-        // Processa as exclusões em paralelo para maior eficiência
-        const deletionPromises = disabledUrls.map(async (url) => {
-            try {
-                // Tenta remover do Redis
-                const removedFromDisabled = await redis.srem(DISABLED_BANNERS_KEY, url);
-                
-                if (removedFromDisabled === 0) {
-                    skippedCount++;
-                    return; 
-                }
 
-                // Tenta excluir do Cloudinary
-                const publicId = extractPublicIdFromUrl(url);
-                if (publicId) {
-                    const destroyResult = await cloudinary.uploader.destroy(publicId); 
-                    if (destroyResult.result === 'ok' || destroyResult.result === 'not found') {
-                         deletedCount++;
-                    } else {
-                        console.error(`❌ Cloudinary: Erro ao deletar ${publicId}:`, destroyResult);
-                        errors++;
-                    }
-                } else {
-                    console.error(`⚠️ Cleanup: Falha ao extrair public_id de: ${url}. Apenas remoção do Redis realizada.`);
-                    deletedCount++; 
-                }
-
-            } catch (innerError) {
-                console.error(`❌ Cleanup: Erro geral ao deletar o banner ${url}:`, innerError.message);
-                errors++;
-            }
-        });
-
-        await Promise.all(deletionPromises);
-        
-        console.log(`🧹 Tarefa de limpeza concluída. Banners excluídos: ${deletedCount}. Erros: ${errors}. Skipped: ${skippedCount}.`);
-        
-        return res.json({ 
-            message: 'Limpeza de banners desativados executada com sucesso.',
-            banners_deleted: deletedCount,
-            errors_count: errors
-        });
+        console.log('✅ Limpeza concluída com sucesso.');
+        return { 
+            message: 'Limpeza automática diária concluída.',
+            redisKeysDeleted: redisDeleteResult,
+            cloudinaryResourcesDeleted: deletedCount
+        };
 
     } catch (error) {
-        console.error('❌ Erro na rota de limpeza:', error);
-        return res.status(500).json({ error: 'Falha ao executar a rotina de limpeza.' });
+        console.error('❌ ERRO CRÍTICO na Limpeza Automática:', error);
+        // Lançar o erro para que o endpoint possa capturá-lo
+        throw new Error(`Falha na limpeza: ${error.message}`);
+    }
+};
+
+/**
+ * POST /api/cleanup: Rota para ser chamada pelo Cron Job do Vercel.
+ * Realiza a exclusão total de todos os encartes.
+ */
+app.post('/api/cleanup', async (req, res) => {
+    try {
+        const result = await deleteAllBanners();
+        return res.status(200).json(result);
+    } catch (error) {
+        // Tratamento do erro lançado pela função
+        return res.status(500).json({ error: 'Falha ao executar a limpeza programada.', details: error.message });
     }
 });
 
