@@ -407,7 +407,7 @@ const deleteAllBanners = async () => {
 
         console.log('✅ Limpeza concluída com sucesso.');
         return { 
-            message: 'Limpeza concluída.',
+            message: 'Limpeza automática diária concluída.',
             redisKeysDeleted: redisDeleteResult,
             cloudinaryResourcesDeleted: deletedCount
         };
@@ -430,26 +430,6 @@ app.post('/api/cleanup', async (req, res) => {
     } catch (error) {
         // Tratamento do erro lançado pela função
         return res.status(500).json({ error: 'Falha ao executar a limpeza programada.', details: error.message });
-    }
-});
-
-/**
- * DELETE /api/encarte/all: Exclui PERMANENTEMENTE todos os banners.
- * Chama a função utilitária deleteAllBanners.
- * ATENÇÃO: Esta ação é destrutiva e remove todos os banners (ativos e desativados) do Redis e Cloudinary.
- */
-app.delete('/api/encarte/all', async (req, res) => {
-    try {
-        console.log('🚨 Rota de exclusão total manual (/api/encarte/all) acionada!');
-        const result = await deleteAllBanners();
-        return res.status(200).json({ 
-            message: 'Todos os banners foram excluídos permanentemente.', 
-            ...result 
-        });
-    } catch (error) {
-        console.error('❌ ERRO ao executar exclusão total manual:', error);
-        // Tratamento do erro lançado pela função
-        return res.status(500).json({ error: 'Falha ao executar a exclusão total de banners.', details: error.message });
     }
 });
 
