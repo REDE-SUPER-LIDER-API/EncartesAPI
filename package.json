@@ -1,4 +1,5 @@
 {
+  "type": "module",
   "dependencies": {
     "cloudinary": "^2.8.0"
   }
