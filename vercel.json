@@ -19,7 +19,7 @@
   "crons": [
     {
       "path": "/api/encarte/cleanup",
-      "schedule": "30 1 * * *"
+      "schedule": "33 17 * * *"
     }
   ]
 }
