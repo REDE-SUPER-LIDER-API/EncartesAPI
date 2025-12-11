@@ -1,4 +1,4 @@
-//server.js
+// index.js (Arquivo na raiz do projeto)
 
 // Importações
 const cloudinary = require('cloudinary').v2;
@@ -14,22 +14,35 @@ cloudinary.config({
   secure: true,
 });
 
-// Configuração do Upstash/Redis (usando a URL fornecida)
+// Configuração do Upstash/Redis
 const redis = new Redis(process.env.UPSTASH_REDIS_URL);
 
 /**
- * Função principal da API Vercel
- * @param {object} req - Objeto de Requisição
- * @param {object} res - Objeto de Resposta
+ * Função principal da API/Servidor Vercel.
+ *
+ * Se você acessar a URL raiz (e.g., SEU_PROJETO.vercel.app/),
+ * esta função será executada.
+ *
+ * @param {object} req - Objeto de Requisição (Request)
+ * @param {object} res - Objeto de Resposta (Response)
  */
 module.exports = async (req, res) => {
+  // O Vercel espera que a função retorne uma promessa ou use res.end() / res.json()
+  
+  if (req.method !== 'GET') {
+    // Responde com o método não permitido
+    return res.status(405).json({ 
+        success: false, 
+        message: 'Método não permitido. Use GET para listar as imagens.' 
+    });
+  }
+
   try {
     // 1. Obter a lista de recursos do Cloudinary
-    // O 'resource_type: "image"' garante que apenas imagens sejam buscadas.
-    // O 'max_results: 10' limita a 10 para uma resposta rápida.
+    console.log('Buscando recursos no Cloudinary...');
     const result = await cloudinary.api.resources({
       type: 'upload',
-      prefix: '', // Busca em todos os diretórios.
+      prefix: '', 
       resource_type: 'image',
       max_results: 10
     });
@@ -40,31 +53,28 @@ module.exports = async (req, res) => {
     // 2. Iterar sobre as imagens e obter metadados do Upstash
     for (const image of images) {
       const publicId = image.public_id;
-      // Obter o URL do Cloudinary para a visualização
       const imageUrl = image.secure_url; 
       
-      // A chave no Redis será o public_id da imagem
+      // Busca metadados no Upstash usando o public_id como chave
       const metadataJson = await redis.get(publicId); 
       let metadata = {};
 
       if (metadataJson) {
-        // Analisar (parse) o JSON armazenado no Upstash
+        // Analisar (parse) o JSON armazenado
         metadata = JSON.parse(metadataJson); 
       }
 
       imageList.push({
         public_id: publicId,
         url: imageUrl,
-        // Adiciona todos os metadados encontrados no Upstash
         metadata: metadata, 
-        // Também adiciona algumas propriedades úteis do Cloudinary
         width: image.width,
         height: image.height,
         format: image.format
       });
     }
 
-    // 3. Responder ao cliente
+    // 3. Responder ao cliente em formato JSON
     res.status(200).json({
       success: true,
       count: imageList.length,
@@ -73,9 +83,10 @@ module.exports = async (req, res) => {
 
   } catch (error) {
     console.error('Erro na API:', error);
+    // Envia um status 500 em caso de erro
     res.status(500).json({
       success: false,
-      message: 'Erro ao processar a requisição',
+      message: 'Erro interno do servidor ao processar a requisição',
       error: error.message
     });
   }
