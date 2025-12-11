@@ -11,5 +11,11 @@
       "src": "/(.*)",
       "dest": "Server.js"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/encartes/cleanup",
+      "schedule": "0 3 * * *" 
+    }
   ]
 }
