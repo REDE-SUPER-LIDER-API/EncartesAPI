@@ -1,4 +1,4 @@
-// server.js (Refatorado: Sem Logística de Dias)
+// server.js (Refatorado: Com Segurança na Rota de Limpeza)
 
 const express = require('express');
 const cors = require('cors');
@@ -420,16 +420,25 @@ const deleteAllBanners = async () => {
 };
 
 /**
- * GET /api/cleanup: Rota para ser chamada pelo Cron Job do Vercel.
- * Realiza a exclusão total de todos os encartes.
- * (Atualizado para GET para compatibilidade com CRON)
+ * GET /api/cleanup: Rota para limpeza programada.
+ * AGORA PROTEGIDA: Requer Header 'Authorization'.
  */
 app.get('/api/cleanup', async (req, res) => {
+    // 1. Verificação de Segurança
+    const authHeader = req.headers['authorization'];
+    const cronSecret = process.env.CRON_SECRET;
+
+    // Formato esperado do header: "Bearer SUA_SENHA_SECRETA"
+    if (!cronSecret || authHeader !== `Bearer ${cronSecret}`) {
+        console.warn('⛔ Tentativa de acesso não autorizado à rota de limpeza.');
+        return res.status(401).json({ error: 'Acesso não autorizado.' });
+    }
+
     try {
+        // 2. Executa a limpeza
         const result = await deleteAllBanners();
         return res.status(200).json(result);
     } catch (error) {
-        // Tratamento do erro lançado pela função
         return res.status(500).json({ error: 'Falha ao executar a limpeza programada.', details: error.message });
     }
 });

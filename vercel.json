@@ -15,11 +15,5 @@
       "src": "/(.*)",
       "dest": "Server.js"
     }
-  ],
-  "crons": [
-    {
-      "path": "/api/cleanup",
-      "schedule": "59 2 * * *"
-    }
   ]
 }
