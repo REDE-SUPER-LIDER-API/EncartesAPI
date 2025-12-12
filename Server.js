@@ -420,10 +420,11 @@ const deleteAllBanners = async () => {
 };
 
 /**
- * POST /api/cleanup: Rota para ser chamada pelo Cron Job do Vercel.
+ * GET /api/cleanup: Rota para ser chamada pelo Cron Job do Vercel.
  * Realiza a exclusão total de todos os encartes.
+ * (Atualizado para GET para compatibilidade com CRON)
  */
-app.post('/api/cleanup', async (req, res) => {
+app.get('/api/cleanup', async (req, res) => {
     try {
         const result = await deleteAllBanners();
         return res.status(200).json(result);
